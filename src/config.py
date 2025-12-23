@@ -48,7 +48,7 @@ def get_model_config() -> EsmConfig:
 
     This is used in:
       - data_processing.py (max_position_embeddings, max_batch_size)
-      - custom_model.py (model_name, dropout overrides, etc.)
+      - model.py (model_name, dropout overrides, etc.)
     """
     model_cfg_dict = _config["model"]
     return EsmConfig.from_dict(model_cfg_dict)

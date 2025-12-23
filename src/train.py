@@ -13,8 +13,8 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint
 
 from config import get_training_config
-from custom_model import initialize_model_and_tokenizer
-from custom_trainer import ProteinLMTrainer
+from model import initialize_model_and_tokenizer
+from trainer import ProteinLMTrainer
 
 
 def main():
@@ -26,6 +26,11 @@ def main():
         type=str,
         default=os.path.join(os.path.dirname(__file__), "config.yaml"),
         help="Path to YAML config file.",
+    )
+    parser.add_argument(
+        "--eval_only",
+        action="store_true",
+        help="Run evaluation only (no training); requires --val_dir.",
     )
     args = parser.parse_args()
 
@@ -39,15 +44,21 @@ def main():
 
     # 1) Load training configuration
     training_config = get_training_config()
+    eval_only = args.eval_only or training_config.get("eval_only", False)
+    training_config["eval_only"] = eval_only
     max_steps = training_config.get("max_steps", 0) or 0
 
     # 2) Gather shard directories for the training set
     train_dir = args.train_dir
-    shard_paths = sorted(glob.glob(os.path.join(train_dir, "shard-*")))
-    if len(shard_paths) == 0:
-        raise ValueError(f"No shards found in {train_dir}!")
-    if rank == 0:
-        print(f"Found {len(shard_paths)} shards for training in {train_dir}.")
+    shard_paths = None
+    if not eval_only:
+        if not train_dir:
+            raise ValueError("--train_dir is required unless running with --eval_only.")
+        shard_paths = sorted(glob.glob(os.path.join(train_dir, "shard-*")))
+        if len(shard_paths) == 0:
+            raise ValueError(f"No shards found in {train_dir}!")
+        if rank == 0:
+            print(f"Found {len(shard_paths)} shards for training in {train_dir}.")
 
     # 3) Load the validation dataset (single HF dataset folder)
     def resolve_val_dir(val_root: str) -> str:
@@ -83,7 +94,7 @@ def main():
     # 4) Initialize model and tokenizer
     if rank == 0:
         print("Initializing model and tokenizer...")
-    model, tokenizer = initialize_model_and_tokenizer()
+    model, tokenizer = initialize_model_and_tokenizer(eval_only=eval_only)
 
     # Print model size only on rank 0
     if rank == 0:
@@ -93,7 +104,7 @@ def main():
     # 5) Resolve last checkpoint (for resume)
     output_dir = training_config["output_dir"]
     last_checkpoint = None
-    if os.path.isdir(output_dir):
+    if (not eval_only) and os.path.isdir(output_dir):
         last_checkpoint = get_last_checkpoint(output_dir)
         if last_checkpoint and rank == 0:
             print(f"Detected checkpoint, will resume from: {last_checkpoint}")
@@ -115,6 +126,7 @@ def main():
         eval_strategy=eval_strategy,
         eval_steps=training_config["eval_steps"],
         save_steps=training_config["save_steps"],
+        save_total_limit=training_config.get("save_total_limit", None),
         learning_rate=training_config["learning_rate"],
         max_grad_norm=training_config.get("gradient_clipping", 0.0),
         gradient_accumulation_steps=training_config["gradient_accumulation_steps"],
@@ -150,7 +162,7 @@ def main():
 
     # 9) Initialize Trainer
     trainer = ProteinLMTrainer(
-        train_dataset=shard_paths,   # list of shard-XXXXX directories
+        train_dataset=shard_paths,   # list of shard-XXXXX directories (None for eval_only)
         eval_dataset=val_dataset,    # HF Dataset
         data_collator=data_collator,
         training_config=training_config,
@@ -158,6 +170,14 @@ def main():
         args=training_args,
         callbacks=callbacks,
     )
+
+    if eval_only:
+        if rank == 0:
+            print("Running evaluation only...")
+        metrics = trainer.evaluate()
+        if rank == 0:
+            print(f"Eval metrics: {metrics}")
+        return
 
     if rank == 0:
         print("Starting training...")

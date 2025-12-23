@@ -48,7 +48,7 @@ def add_mlm_loss_forward(model: torch.nn.Module) -> torch.nn.Module:
     return model
 
 
-def initialize_model_and_tokenizer():
+def initialize_model_and_tokenizer(eval_only: bool = False):
     """
     Initialize FAESM ESM2 MaskedLM + tokenizer:
 
@@ -88,13 +88,37 @@ def initialize_model_and_tokenizer():
         raw_cfg = load_config()
 
     model_cfg_raw = (raw_cfg or {}).get("model", {})
-    if "hidden_dropout_prob" in model_cfg_raw:
-        config.hidden_dropout_prob = float(model_cfg_raw["hidden_dropout_prob"])
-    if "attention_probs_dropout_prob" in model_cfg_raw:
-        config.attention_probs_dropout_prob = float(model_cfg_raw["attention_probs_dropout_prob"])
+    training_cfg_raw = (raw_cfg or {}).get("training", {})
 
-    # Fresh model initialized from config (training from scratch)
-    model = FAEsmForMaskedLM(config)
+    # Decide desired torch dtype for eval based on mixed_precision setting.
+    mp_mode = str(training_cfg_raw.get("mixed_precision", "")).lower()
+    torch_dtype = None
+    if mp_mode == "bf16":
+        torch_dtype = torch.bfloat16
+    elif mp_mode == "fp16":
+        torch_dtype = torch.float16
+
+    if eval_only:
+        # For eval-only: load pretrained weights directly. Passing `config=...`
+        # triggers a duplicate 'config' argument in faesm's from_pretrained, so
+        # we avoid it and then apply essential flags afterward.
+        model = FAEsmForMaskedLM.from_pretrained(model_name)
+        if torch_dtype is not None:
+            model = model.to(torch_dtype)
+        # Ensure FA flag reflects YAML preference
+        if not hasattr(model.config, "use_fa"):
+            model.config.use_fa = False
+        model.config.use_fa = bool(model_cfg_raw.get("use_fa", model.config.use_fa))
+        # Keep other config fields as loaded; dropout overrides are skipped here to avoid reinit conflicts.
+    else:
+        # Apply dropout overrides only for fresh init (training from scratch)
+        if "hidden_dropout_prob" in model_cfg_raw:
+            config.hidden_dropout_prob = float(model_cfg_raw["hidden_dropout_prob"])
+        if "attention_probs_dropout_prob" in model_cfg_raw:
+            config.attention_probs_dropout_prob = float(model_cfg_raw["attention_probs_dropout_prob"])
+
+        # Fresh model initialized from config (training from scratch)
+        model = FAEsmForMaskedLM(config)
 
     # Add MLM loss so Trainer sees `loss` in outputs
     model = add_mlm_loss_forward(model)
