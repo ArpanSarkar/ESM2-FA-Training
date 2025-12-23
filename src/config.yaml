@@ -1,39 +1,83 @@
 model:
-  model_name: "facebook/esm2_t30_150M_UR50D"
-  max_position_embeddings: 4098          # Maximum sequence length (including BOS/EOS tokens)
-  max_batch_size: 8196                   # Maximum number of tokens per batch for pre-batching
-  use_fa: true                           
-  emb_layer_norm_before: true            # Apply LayerNorm before embedding projection
-  num_layers: 30                         
-  hidden_size: 640                       
-  intermediate_size: 2560                
-  num_attention_heads: 20                
+  # Architecture is defined by this HF/FAESM checkpoint.
+  # Change this to train a different ESM2 variant (e.g. 150M, 3B, etc.).
+  model_name: "facebook/esm2_t33_650M_UR50D"
+
+  # Max context length for the model, INCLUSIVE of special tokens.
+  # This must be consistent with the underlying model config.
+  # For ESM2-650M, HF EsmConfig uses 1026 positions (CLS + 1024 AAs + EOS).
+  max_position_embeddings: 1026
+
+  # Token budget for pre-batching in data_processing.py
+  # (approximate max tokens per batch before padding).
+  max_batch_size: 8192
+
+  # Use FlashAttention/FAESM path if available; set to false to force SDPA.
+  use_fa: true
+
+  # Optional dropout overrides used in custom_model.initialize_model_and_tokenizer().
+  # If you omit these, the original model config's dropout values are used.
+  hidden_dropout_prob: 0.0               # set to 0.0 for "no dropout" (Cheng et al., 2024, bioRxiv: Training Compute-Optimal Protein Language Models)
+  attention_probs_dropout_prob: 0.0      # set to 0.0 for "no dropout" (Cheng et al., 2024, bioRxiv: Training Compute-Optimal Protein Language Models)
 
 training:
-  gradient_accumulation_steps: 64
-  learning_rate: 0.0004
-  optimizer:
-    beta_1: 0.99
-    beta_2: 0.98
-    epsilon: 1e-12
-    weight_decay: 0.01
-  gradient_clipping: 0.5
-  lr_scheduler: "linear"
+  # How often to run evaluation: "steps" or "epoch"
   evaluation_strategy: "steps"
-  total_steps: 120000 # Total optimization steps (after accumulation) #125k steps would be ~45 epochs (like ESM-2) with our dataset size
-  warmup_steps: 2000
-  mlm_probability: 0.25 # Masking probability (could be 0.2 or 0.15 from "Training Compute-Optimal Protein Language Models" paper) maybe split the difference and call it 0.2
-  logging_steps: 100
-  eval_steps: 10000
-  save_steps: 10000
-  output_dir: "./runs/pLM120K_NL"
-  mixed_precision: "fp16"
+  # Effective global batch is:
+  #   per_device_batch * gradient_accumulation_steps * world_size
+  gradient_accumulation_steps: 32
+
+  # Optimizer defaults following Cheng et al. (2024, bioRxiv: Training Compute-Optimal Protein Language Models)
+  learning_rate: 4e-4
+  optimizer:
+    beta_1: 0.9
+    beta_2: 0.95
+    epsilon: 1e-8
+    weight_decay: 0.01
+
+  gradient_clipping: 0.5
+
+  # For Trainer: this is the label of the scheduler; actual schedule
+  # (warmup + cosine with plateau) is implemented in ProteinLMTrainer.create_scheduler().
+  lr_scheduler: "cosine"
+
+  # Step budget
+  schedule_steps: 100000      # decay horizon; LR decays to 0.1 * peak by this step
+  max_steps: 200000           # hard stop for training / plateau duration
+  warmup_steps: 2500          # fixed warmup; do not auto-derive
+
+  # Masking probability for MLM
+  mlm_probability: 0.15        # in the suggested range from Cheng et al. (2024, bioRxiv: Training Compute-Optimal Protein Language Models)
+
+  logging_steps: 1
+  eval_steps: 1000 #1000
+  save_steps: 2000
+
+  output_dir: "./runs/pfamseq90_trial_12_23_2025_batch_size_8192"
+
+  # Early stopping / best checkpointing
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  greater_is_better: false
+  early_stopping:
+    enabled: true
+    patience: 3
+    threshold: 0.0
+
+  # Mixed precision mode for Trainer
+  # Use "bf16" on A100/H100 if possible; "fp16" otherwise.
+  mixed_precision: "bf16"
+
   dataloader_num_workers: 4
   dataloader_prefetch_factor: 4
   dataloader_pin_memory: true
+
   seed: 100
 
 data:
-  chunk_size: 1000000
-  default_tmp_dir: "data/tmp_chunks"
+  # Number of sequences per preprocessing "window".
+  # Within each window we sort by length and form token-limited batches.
+  chunk_size: 100000
+
+  # Batches per shard. Each shard-XXXXX is a HF dataset of pre-batched examples.
   default_shard_size: 25000
